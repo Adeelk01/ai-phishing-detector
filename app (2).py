@@ -7,6 +7,9 @@ import urllib.parse
 from sklearn.feature_extraction.text import TfidfVectorizer
 import torch
 import warnings
+import json
+from datetime import datetime
+import os
 warnings.filterwarnings('ignore')
 
 class PhishingDetector:
@@ -35,6 +38,9 @@ class PhishingDetector:
             'bit.ly', 'tinyurl.com', 'shorturl.at', 't.co'
         ]
         
+        # Initialize history file
+        self.history_file = "analysis_history.json"
+        
     def extract_features(self, email_text, subject="", sender=""):
         """Extract various features from email content"""
         features = {}
@@ -61,10 +67,100 @@ class PhishingDetector:
         
         return features
     
+    def save_analysis_history(self, email_text, subject, sender, risk_level, risk_score, explanation):
+        """Save analysis to history file"""
+        try:
+            # Create analysis record
+            analysis_record = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'email_preview': email_text[:100] + "..." if len(email_text) > 100 else email_text,
+                'subject': subject,
+                'sender': sender,
+                'risk_level': risk_level,
+                'risk_score': risk_score,
+                'explanation': explanation
+            }
+            
+            # Load existing history
+            history = self.load_analysis_history()
+            
+            # Add new record at the beginning
+            history.insert(0, analysis_record)
+            
+            # Keep only last 100 records
+            history = history[:100]
+            
+            # Save back to file
+            with open(self.history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+                
+            return f"✅ Analysis saved to history ({len(history)} total records)"
+            
+        except Exception as e:
+            return f"⚠️ Could not save to history: {str(e)}"
+    
+    def load_analysis_history(self):
+        """Load analysis history from file"""
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+            return []
+        except:
+            return []
+    
+    def get_history_stats(self):
+        """Get statistics from analysis history"""
+        history = self.load_analysis_history()
+        
+        if not history:
+            return "No analysis history available yet."
+        
+        total_analyses = len(history)
+        high_risk = len([h for h in history if 'HIGH RISK' in h['risk_level']])
+        medium_risk = len([h for h in history if 'MEDIUM RISK' in h['risk_level']])
+        low_risk = len([h for h in history if 'LOW RISK' in h['risk_level']])
+        
+        avg_risk_score = np.mean([h['risk_score'] for h in history])
+        
+        stats = f"""
+📊 **ANALYSIS STATISTICS**
+
+📧 Total Emails Analyzed: {total_analyses}
+🔴 High Risk Detected: {high_risk} ({high_risk/total_analyses*100:.1f}%)
+🟡 Medium Risk Detected: {medium_risk} ({medium_risk/total_analyses*100:.1f}%)
+🟢 Low Risk (Safe): {low_risk} ({low_risk/total_analyses*100:.1f}%)
+
+📈 Average Risk Score: {avg_risk_score:.1f}%
+🛡️ Threats Blocked: {high_risk + medium_risk}
+        """
+        
+        return stats
+    
+    def get_recent_history(self, limit=10):
+        """Get recent analysis history"""
+        history = self.load_analysis_history()
+        
+        if not history:
+            return "No recent analyses available."
+        
+        recent = history[:limit]
+        
+        history_text = "🕐 **RECENT ANALYSES:**\n\n"
+        
+        for i, record in enumerate(recent, 1):
+            risk_emoji = "🔴" if "HIGH" in record['risk_level'] else "🟡" if "MEDIUM" in record['risk_level'] else "🟢"
+            history_text += f"{i}. {risk_emoji} **{record['timestamp']}**\n"
+            history_text += f"   Subject: {record['subject'][:50]}...\n"
+            history_text += f"   Risk: {record['risk_level']}\n"
+            history_text += f"   Score: {record['risk_score']}%\n\n"
+        
+        return history_text
+    
     def analyze_email(self, email_text, subject="", sender=""):
         """Main analysis function"""
         if not email_text.strip():
-            return "Please enter email content to analyze.", 0.0, ""
+            return "Please enter email content to analyze.", 0.0, "", "No analysis performed.", ""
         
         # Extract features
         features = self.extract_features(email_text, subject, sender)
@@ -113,7 +209,10 @@ class PhishingDetector:
         else:
             risk_level = "🟢 LOW RISK - Appears Safe"
         
-        return risk_level, round(risk_score * 100, 1), explanation
+        # Save to history
+        save_status = self.save_analysis_history(email_text, subject, sender, risk_level, round(risk_score * 100, 1), explanation)
+        
+        return risk_level, round(risk_score * 100, 1), explanation, save_status
     
     def generate_explanation(self, features, risk_score):
         """Generate explanation for the risk assessment"""
@@ -187,6 +286,12 @@ def analyze_with_sample(sample_choice, email_text, subject, sender):
     
     return detector.analyze_email(email_text, subject, sender)
 
+def get_stats():
+    return detector.get_history_stats()
+
+def get_history():
+    return detector.get_recent_history()
+
 # Create Gradio interface
 def create_interface():
     with gr.Blocks(title="AI Phishing Email Detector", theme=gr.themes.Soft()) as demo:
@@ -196,53 +301,86 @@ def create_interface():
         **Protect yourself from phishing attacks using advanced AI analysis!**
         
         This tool analyzes emails for suspicious patterns, phishing keywords, and social engineering tactics.
-        Built with Hugging Face Transformers and deployed on Hugging Face Spaces.
+        Built with Hugging Face Transformers and now with **Analysis History** feature!
         """)
         
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### 📧 Email Analysis")
-                
-                sample_dropdown = gr.Dropdown(
-                    choices=["Custom Email"] + list(sample_emails.keys()),
-                    value="Custom Email",
-                    label="Try Sample Emails or Enter Custom",
-                    interactive=True
-                )
-                
-                email_input = gr.Textbox(
-                    lines=10,
-                    placeholder="Paste the email content here...",
-                    label="Email Content",
-                    interactive=True
-                )
-                
+        with gr.Tabs():
+            # Main Analysis Tab
+            with gr.TabItem("📧 Email Analysis"):
                 with gr.Row():
-                    subject_input = gr.Textbox(
-                        placeholder="Email subject (optional)",
-                        label="Subject Line",
-                        interactive=True
-                    )
-                    sender_input = gr.Textbox(
-                        placeholder="Sender email (optional)",
-                        label="Sender",
-                        interactive=True
-                    )
-                
-                analyze_btn = gr.Button("🔍 Analyze Email", variant="primary", size="lg")
-                
-            with gr.Column(scale=1):
-                gr.Markdown("### 📊 Analysis Results")
-                
-                risk_output = gr.Textbox(label="Risk Level", interactive=False)
-                score_output = gr.Number(label="Risk Score (%)", interactive=False)
-                
-                gr.Markdown("### 📋 Detailed Analysis")
-                explanation_output = gr.Textbox(
-                    lines=6,
-                    label="Risk Factors",
-                    interactive=False
-                )
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 📧 Email Analysis")
+                        
+                        sample_dropdown = gr.Dropdown(
+                            choices=["Custom Email"] + list(sample_emails.keys()),
+                            value="Custom Email",
+                            label="Try Sample Emails or Enter Custom",
+                            interactive=True
+                        )
+                        
+                        email_input = gr.Textbox(
+                            lines=10,
+                            placeholder="Paste the email content here...",
+                            label="Email Content",
+                            interactive=True
+                        )
+                        
+                        with gr.Row():
+                            subject_input = gr.Textbox(
+                                placeholder="Email subject (optional)",
+                                label="Subject Line",
+                                interactive=True
+                            )
+                            sender_input = gr.Textbox(
+                                placeholder="Sender email (optional)",
+                                label="Sender",
+                                interactive=True
+                            )
+                        
+                        analyze_btn = gr.Button("🔍 Analyze Email", variant="primary", size="lg")
+                        
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 📊 Analysis Results")
+                        
+                        risk_output = gr.Textbox(label="Risk Level", interactive=False)
+                        score_output = gr.Number(label="Risk Score (%)", interactive=False)
+                        
+                        gr.Markdown("### 📋 Detailed Analysis")
+                        explanation_output = gr.Textbox(
+                            lines=6,
+                            label="Risk Factors",
+                            interactive=False
+                        )
+                        
+                        # NEW: Save status display
+                        save_status = gr.Textbox(
+                            label="Save Status",
+                            interactive=False,
+                            visible=True
+                        )
+            
+            # NEW: History Tab
+            with gr.TabItem("📊 Analysis History"):
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### 📈 Your Analysis Statistics")
+                        
+                        stats_btn = gr.Button("📊 Refresh Statistics", variant="secondary")
+                        stats_output = gr.Textbox(
+                            lines=15,
+                            label="Statistics",
+                            interactive=False
+                        )
+                        
+                    with gr.Column():
+                        gr.Markdown("### 🕐 Recent Analyses")
+                        
+                        history_btn = gr.Button("🕐 Refresh History", variant="secondary")
+                        history_output = gr.Textbox(
+                            lines=15,
+                            label="Recent History",
+                            interactive=False
+                        )
         
         gr.Markdown("""
         ### 🎯 How It Works
@@ -254,24 +392,23 @@ def create_interface():
         - **Content Patterns**: Unusual formatting and grammar
         - **AI Sentiment**: Advanced language understanding
         
-        ### 🔧 Technology Stack
-        - **AI Model**: DistilBERT (Hugging Face Transformers)
-        - **Interface**: Gradio
-        - **Analysis**: Multi-layer feature extraction
-        - **Deployment**: Hugging Face Spaces
+        ### 🆕 New Features
+        - **Analysis History**: All your analyses are automatically saved
+        - **Statistics Dashboard**: Track your email security over time
+        - **Recent Activity**: View your last 10 analyses
         
         ### ⚠️ Disclaimer
         This is a demo tool for educational purposes. Always use multiple verification methods for important emails.
         
         ---
-        **Created by**: [Your Name] | **GitHub**: [Your GitHub Link] | **Demo for Hackathon**
+        **Created by**: [Your Name] | **GitHub**: [Your GitHub Link] | **Enhanced Version with History**
         """)
         
-        # Event handlers
+        # Event handlers for main analysis
         analyze_btn.click(
             fn=analyze_with_sample,
             inputs=[sample_dropdown, email_input, subject_input, sender_input],
-            outputs=[risk_output, score_output, explanation_output]
+            outputs=[risk_output, score_output, explanation_output, save_status]
         )
         
         sample_dropdown.change(
@@ -279,10 +416,26 @@ def create_interface():
             inputs=[sample_dropdown],
             outputs=[email_input]
         )
+        
+        # Event handlers for history
+        stats_btn.click(
+            fn=get_stats,
+            outputs=[stats_output]
+        )
+        
+        history_btn.click(
+            fn=get_history,
+            outputs=[history_output]
+        )
     
     return demo
 
 # Launch the interface
 if __name__ == "__main__":
     demo = create_interface()
-    demo.launch()
+    demo.launch(
+        share=True,  # Creates public link
+        server_name="0.0.0.0",  # For Colab
+        server_port=7860,
+        show_error=True
+    )
